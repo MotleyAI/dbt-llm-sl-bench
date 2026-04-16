@@ -200,6 +200,105 @@ class SQLQueryStrategy(QueryStrategy):
             return QueryGenerationResult.error_result(e, prompt, timing)
 
 
+class SLayerQueryStrategy(QueryStrategy):
+    """Strategy for generating SLayer JSON queries"""
+
+    def __init__(self, config: BaseConfig) -> None:
+        self.config = config
+
+    def generate_query(self, request: QueryRequest) -> QueryGenerationResult:
+        start_time = time.time()
+        logger.debug(f"[SLayer] Starting query generation for: {request.question[:50]}...")
+
+        if not request.context or "slayer_model_summaries" not in request.context:
+            error = ValueError("SLayerQueryStrategy requires slayer_model_summaries in context")
+            logger.error("[SLayer] Missing required context")
+            return QueryGenerationResult.error_result(error, "", time.time() - start_time)
+
+        prompt = r"""
+        You are generating a SLayer semantic layer query as a JSON object.
+
+        SLayer queries have this structure:
+        {
+          "source_model": "model_name",
+          "fields": [{"formula": "measure_name:aggregation"}],
+          "dimensions": ["dim1", "dim2"],
+          "filters": ["dim == 'value'", "dim > 100"],
+          "time_dimensions": [{"dimension": "date_col", "granularity": "month"}],
+          "order": [{"column": "field_name", "direction": "desc"}],
+          "limit": 10
+        }
+
+        Key syntax rules:
+        - Fields use colon syntax for aggregations: "revenue:sum", "*:count", "amount:avg", "id:count_distinct"
+        - "*:count" means COUNT(*) — count all rows
+        - "measure_name:count" means COUNT(measure_name) — count non-null values
+        - Available aggregations: sum, avg, min, max, count, count_distinct, median
+        - For derived calculations: {"formula": "measure1:sum / measure2:sum", "name": "result_name"}
+        - Dimensions from joined models use dot syntax: "joined_model.dimension_name"
+        - Fields from joined models: {"formula": "joined_model.measure:sum"}
+        - Filters: "dimension == 'value'", "dimension > 100", "dimension IN ('a', 'b')"
+        - Time dimensions specify grouping by date with granularity (day, week, month, quarter, year)
+
+        Available models and their schemas:
+
+        """
+        prompt += request.context["slayer_model_summaries"]
+        prompt += """
+
+        Write a SLayer query JSON to answer the following question.
+        Return ONLY the JSON object, no explanation, no markdown formatting.
+
+        IMPORTANT: Your response must be a single JSON object. Do not use CTEs, subqueries, or multiple queries.
+        If the question cannot be answered with a single SLayer query, return exactly: CANNOT_ANSWER
+
+        Here's the question:
+        """
+        prompt += request.question
+
+        try:
+            logger.debug("[SLayer] Executing prompt via LLM...")
+            query_result = execute_prompt(prompt, self.config)
+            timing = time.time() - start_time
+
+            # Extract JSON from response (LLM may wrap in markdown code blocks)
+            raw_text = query_result.text.strip()
+            json_text = _extract_json(raw_text)
+
+            logger.info(f"[SLayer] Generated SLayer query (took {timing:.2f}s)")
+            logger.debug(f"[SLayer] Query result: {json_text[:100]}...")
+            return QueryGenerationResult.success_result(json_text, prompt, timing, query_result.usage, query_result.model_name)
+        except Exception as e:
+            timing = time.time() - start_time
+            logger.error(f"[SLayer] Failed to generate query after {timing:.2f}s: {e}")
+            return QueryGenerationResult.error_result(e, prompt, timing)
+
+
+def _extract_json(text: str) -> str:
+    """Extract JSON object from LLM response text.
+
+    Handles markdown code blocks, commentary before/after, etc.
+    """
+    # If it's CANNOT_ANSWER, pass through
+    if text.strip() == "CANNOT_ANSWER":
+        return text
+
+    # Strip markdown code blocks
+    if "```" in text:
+        import re
+        match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
+        if match:
+            text = match.group(1).strip()
+
+    # Try to find JSON object boundaries
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return text[start:end + 1]
+
+    return text
+
+
 class QueryGenerationService:
     """Service for generating queries using different strategies"""
 
@@ -209,6 +308,7 @@ class QueryGenerationService:
             "semantic_layer": SemanticLayerQueryStrategy(config),
             "mcp": MCPQueryStrategy(config),
             "sql": SQLQueryStrategy(config),
+            "slayer": SLayerQueryStrategy(config),
         }
 
     def generate_query(self, strategy_name: str, request: QueryRequest) -> QueryGenerationResult:

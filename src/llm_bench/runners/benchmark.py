@@ -27,7 +27,7 @@ class BenchmarkServices:
     """Container for benchmark dependencies"""
 
     config: BaseConfig
-    database_service: DatabaseService
+    database_service: DatabaseService  # Also accepts SLayerDatabaseService (same interface)
     query_service: QueryGenerationService
     comparison_service: ComparisonService
     factory: SQLAnswerFactory
@@ -358,6 +358,48 @@ class BenchmarkRunner:
         return self.sql_answers_list, results_df
 
 
+def _build_slayer_context(slayer_models_dir: str) -> dict[str, str]:
+    """Build model context for SLayer strategy from YAML storage."""
+    import json
+
+    from slayer.storage.yaml_storage import YAMLStorage
+
+    storage = YAMLStorage(base_dir=slayer_models_dir)
+    model_summaries = []
+    for model_name in storage.list_models():
+        model = storage.get_model(model_name)
+        if model is None or model.hidden:
+            continue
+        summary = {
+            "name": model.name,
+            "description": model.description,
+            "dimensions": [
+                {
+                    "name": d.name,
+                    "type": str(d.type.value) if d.type else "string",
+                    "description": d.description,
+                }
+                for d in model.dimensions
+                if not d.hidden
+            ],
+            "measures": [
+                {
+                    "name": m.name,
+                    "description": m.description,
+                    "allowed_aggregations": m.allowed_aggregations,
+                }
+                for m in model.measures
+                if not m.hidden
+            ],
+            "joins": [
+                {"target_model": j.target_model, "join_pairs": j.join_pairs}
+                for j in model.joins
+            ],
+        }
+        model_summaries.append(summary)
+    return {"slayer_model_summaries": json.dumps(model_summaries, indent=2)}
+
+
 def run_single_benchmark(
     config: BaseConfig,
     challenges: pd.DataFrame | None = None,
@@ -386,7 +428,7 @@ def run_single_benchmark(
         challenges = challenges[challenges["challenge_text"].isin(config.selected_challenges)].copy()
         logger.debug(f"Filtered to {len(challenges)} challenges")
 
-    # Setup metric context if needed for semantic layer
+    # Setup metric context if needed for semantic layer or slayer
     metric_context = None
     if config.strategy == "semantic_layer":
         logger.debug("Setting up metric context for semantic layer...")
@@ -401,6 +443,10 @@ def run_single_benchmark(
             logger.debug("Metric context loaded successfully")
         else:
             logger.warning("Failed to load metric context")
+    elif config.strategy == "slayer":
+        logger.debug("Setting up model context for SLayer...")
+        metric_context = _build_slayer_context(config.slayer_models_dir)
+        logger.debug("SLayer model context loaded successfully")
 
     # Create services and run benchmark
     logger.debug("Creating services...")

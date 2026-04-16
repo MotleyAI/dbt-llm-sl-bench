@@ -3,7 +3,7 @@
 from typing import TYPE_CHECKING
 
 from llm_bench.config.base import BaseConfig
-from llm_bench.config.strategies import MCPConfig, SemanticLayerConfig, SQLConfig
+from llm_bench.config.strategies import MCPConfig, SemanticLayerConfig, SLayerConfig, SQLConfig
 from llm_bench.factories.answer_factory import SQLAnswerFactory
 from llm_bench.services.comparison import ComparisonService
 from llm_bench.services.database import DatabaseService
@@ -18,7 +18,12 @@ class ConfigurationManager:
     """Manages configuration instances and provides factory methods"""
 
     def __init__(self) -> None:
-        self._configs = {"semantic_layer": SemanticLayerConfig(), "mcp": MCPConfig(), "sql": SQLConfig()}
+        self._configs = {
+            "semantic_layer": SemanticLayerConfig(),
+            "mcp": MCPConfig(),
+            "sql": SQLConfig(),
+            "slayer": SLayerConfig(),
+        }
         self._default_config = self._configs["semantic_layer"]
 
     def get_config(self, strategy: str) -> BaseConfig:
@@ -39,7 +44,16 @@ class ConfigurationManager:
         """Create all services for a given configuration"""
         from llm_bench.runners.benchmark import BenchmarkServices
 
-        database_service = DatabaseService(config)
+        if config.strategy == "slayer":
+            from llm_bench.services.slayer_database import SLayerDatabaseService
+
+            database_service = SLayerDatabaseService(
+                slayer_models_dir=config.slayer_models_dir,
+                slayer_db_path=config.slayer_db_path,
+            )
+        else:
+            database_service = DatabaseService(config)
+
         query_service = QueryGenerationService(config)
         comparison_service = ComparisonService()
         factory = SQLAnswerFactory(config)

@@ -12,7 +12,7 @@ import warnings
 import nest_asyncio
 from loguru import logger
 
-from llm_bench.config import MCPConfig, SemanticLayerConfig, SQLConfig, validate_configs
+from llm_bench.config import MCPConfig, SemanticLayerConfig, SLayerConfig, SQLConfig, validate_configs
 from llm_bench.runners import run_matrix_benchmark
 
 
@@ -63,7 +63,7 @@ def create_model_matrix(strategy: str, models: list[str] | None = None):
         models = ["openai:gpt-5"]
 
     configs = []
-    strategy_class = {"semantic_layer": SemanticLayerConfig, "mcp": MCPConfig, "sql": SQLConfig}[strategy]
+    strategy_class = {"semantic_layer": SemanticLayerConfig, "mcp": MCPConfig, "sql": SQLConfig, "slayer": SLayerConfig}[strategy]
 
     for model in models:
         configs.append(strategy_class(model_name=model))
