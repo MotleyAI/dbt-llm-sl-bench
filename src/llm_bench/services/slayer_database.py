@@ -50,7 +50,7 @@ class SLayerDatabaseService:
         try:
             query_dict = json.loads(query_json)
             client = self._get_client()
-            response = client.query(query_dict)
+            response = client.query_sync(query_dict)
             df = pd.DataFrame(response.data)
             if print_result:
                 logger.info(f"SLayer result:\n{df}")
@@ -63,11 +63,19 @@ class SLayerDatabaseService:
             error_msg = f"SLayer query error: {e}"
             logger.error(error_msg)
             return DatabaseExecutionResult.error_result(error_msg)
+        finally:
+            # Release DuckDB file lock so subsequent gold queries via raw
+            # duckdb.connect() don't fail with "different configuration".
+            from slayer.sql.client import _sync_engines
+
+            for engine in _sync_engines.values():
+                engine.dispose()
+            _sync_engines.clear()
 
     def _execute_sql(self, sql: str, print_result: bool = False) -> DatabaseExecutionResult:
         """Execute raw SQL against DuckDB (for gold queries)."""
         try:
-            conn = duckdb.connect(self.slayer_db_path, read_only=True)
+            conn = duckdb.connect(self.slayer_db_path)
             try:
                 df = conn.execute(sql).fetchdf()
                 if print_result:
