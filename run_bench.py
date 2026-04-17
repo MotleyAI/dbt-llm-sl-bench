@@ -103,18 +103,23 @@ if __name__ == "__main__":
     # from llm_bench.config import semantic_config
     # sql_answers_list, results_df = run_single_benchmark(semantic_config)
 
-    # GPT-5.3 Codex — thinking-level comparison (5 iterations)
-    model_efforts: list[tuple[str, list[str]]] = [
-        ("openai:gpt-5.3-codex", ["none", "minimal", "low", "medium", "high", "xhigh"]),
-    ]
-
+    # SLayer vs raw SQL — single-effort comparison across two models.
+    # 2 strategies × 2 models × 11 default challenges × 5 iterations = 220 LLM calls.
     example_configs = []
-    for model, efforts in model_efforts:
-        for effort in efforts:
-            for strategy_cls in [SQLConfig, SemanticLayerConfig]:
-                example_configs.append(
-                    strategy_cls(model_name=model, number_of_iterations=5, reasoning_effort=effort)
-                )
+    for strategy_cls in [SQLConfig, SLayerConfig]:
+        example_configs.append(
+            strategy_cls(
+                model_name="openai:gpt-5.3-codex",
+                number_of_iterations=5,
+                reasoning_effort="medium",
+            )
+        )
+        example_configs.append(
+            strategy_cls(
+                model_name="openai:gpt-4.1-mini",
+                number_of_iterations=5,
+            )  # reasoning_effort stays None — gpt-4.1-mini is not a reasoning model
+        )
 
     # Validate all configs before running
     validate_configs(example_configs)  # TODO: re-enable once pydantic-ai adds gpt-5.3-codex

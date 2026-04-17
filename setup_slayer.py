@@ -1,13 +1,22 @@
 """Setup script for SLayer benchmark strategy.
 
 One-time script that:
-1. Loads ACME Insurance CSV data into a DuckDB database
-2. Creates views for additional bridge models (from refresh-2025-additional-models branch)
-3. Converts dbt semantic models to SLayer models via dbt ingestion
-4. Saves SLayer models + datasource config to YAML storage
+1. Loads ACME Insurance CSV data into a DuckDB database.
+2. Converts dbt semantic models to SLayer models via dbt ingestion. When
+   the chosen dbt branch includes regular dbt models (SQL bridge views),
+   SLayer inlines their resolved SQL into ``SlayerModel.sql`` directly —
+   no DuckDB views are created as part of setup.
 
 Usage:
-    python setup_slayer.py [--dbt-project-path PATH] [--db-path PATH] [--models-dir PATH]
+    python setup_slayer.py [--dbt-project-path PATH] [--db-path PATH]
+                           [--models-dir PATH] [--no-bridges]
+
+    --no-bridges: use the `main` branch of the dbt project (25 base
+    semantic models, no `policy_holder_policy`/`claim_policy_bridge`/
+    `policy_premium_detail` bridges). Default uses the
+    `refresh-2025-additional-models` branch which adds those 3 bridge
+    models as pure SLayer models (ingested via SLayer's dbt inline-SQL
+    support).
 """
 
 import argparse
@@ -18,6 +27,7 @@ from pathlib import Path
 
 import duckdb
 
+from slayer.async_utils import run_sync
 from slayer.core.models import DatasourceConfig
 from slayer.dbt.converter import DbtToSlayerConverter
 from slayer.dbt.parser import parse_dbt_project
@@ -32,74 +42,17 @@ _DEFAULT_DBT_PROJECT = _SCRIPT_DIR.parent / "semantic-layer-llm-benchmarking"
 _DEFAULT_DB_PATH = _SCRIPT_DIR / "acme.duckdb"
 _DEFAULT_MODELS_DIR = _SCRIPT_DIR / "slayer_models"
 _CSV_DIR_NAME = "ACME_Insurance/data"
-
-# Additional bridge model SQL (from refresh-2025-additional-models branch).
-# These pre-join tables to shorten entity hop paths for complex questions.
-_BRIDGE_VIEWS = {
-    "claim_policy_bridge": """
-        CREATE OR REPLACE VIEW claim_policy_bridge AS
-        SELECT
-            c.claim_identifier,
-            c.claim_open_date,
-            c.claim_close_date,
-            c.claim_status_code,
-            c.company_claim_number,
-            p.policy_identifier,
-            p.policy_number,
-            p.effective_date AS policy_effective_date,
-            p.expiration_date AS policy_expiration_date
-        FROM claim c
-        INNER JOIN claim_coverage cc
-            ON c.claim_identifier = cc.claim_identifier
-        INNER JOIN policy_coverage_detail pcd
-            ON cc.policy_coverage_detail_identifier = pcd.policy_coverage_detail_identifier
-        INNER JOIN policy p
-            ON pcd.policy_identifier = p.policy_identifier
-    """,
-    "policy_holder_policy": """
-        CREATE OR REPLACE VIEW policy_holder_policy AS
-        SELECT
-            apr.party_identifier,
-            apr.agreement_identifier AS policy_identifier,
-            p.policy_number,
-            pt.party_name,
-            pt.party_type_code,
-            apr.effective_date AS relationship_effective_date,
-            apr.expiration_date AS relationship_expiration_date,
-            p.effective_date AS policy_effective_date,
-            p.expiration_date AS policy_expiration_date,
-            p.status_code AS policy_status_code
-        FROM agreement_party_role apr
-        INNER JOIN party pt
-            ON apr.party_identifier = pt.party_identifier
-        INNER JOIN policy p
-            ON apr.agreement_identifier = p.policy_identifier
-        WHERE apr.party_role_code = 'PH'
-    """,
-    "policy_premium_detail": """
-        CREATE OR REPLACE VIEW policy_premium_detail AS
-        SELECT
-            p.policy_identifier,
-            p.policy_number,
-            p.effective_date AS policy_effective_date,
-            p.expiration_date AS policy_expiration_date,
-            p.status_code,
-            pa.policy_amount_identifier,
-            pa.policy_amount,
-            pa.amount_type_code,
-            pa.insurance_type_code,
-            pa.effective_date AS amount_effective_date
-        FROM policy p
-        INNER JOIN policy_amount pa
-            ON p.policy_identifier = pa.policy_identifier
-        INNER JOIN premium pr
-            ON pa.policy_amount_identifier = pr.policy_amount_identifier
-    """,
-}
+_DEFAULT_DBT_BRANCH = "refresh-2025-additional-models"
+_NO_BRIDGES_DBT_BRANCH = "main"
 
 
 def load_csvs_into_duckdb(csv_dir: Path, db_path: Path) -> None:
-    """Load all ACME Insurance CSVs into DuckDB tables."""
+    """Load all ACME Insurance CSVs into DuckDB tables.
+
+    Only the raw CSV-backed tables are created. Bridge models — when
+    present on the selected dbt branch — come through as SLayer models
+    with inline SQL, not as DuckDB views.
+    """
     if db_path.exists():
         db_path.unlink()
         logger.info(f"Removed existing database: {db_path}")
@@ -125,12 +78,6 @@ def load_csvs_into_duckdb(csv_dir: Path, db_path: Path) -> None:
         tables = conn.execute("SHOW TABLES").fetchall()
         logger.info(f"  Created {len(tables)} tables: {[t[0] for t in tables]}")
 
-        # Create bridge views
-        logger.info("Creating bridge model views...")
-        for view_name, view_sql in _BRIDGE_VIEWS.items():
-            logger.info(f"  Creating view '{view_name}'")
-            conn.execute(view_sql)
-
     finally:
         conn.close()
 
@@ -155,7 +102,7 @@ def convert_dbt_to_slayer(
     dbt_project_path: Path,
     models_dir: Path,
     db_path: Path,
-    dbt_branch: str = "refresh-2025-additional-models",
+    dbt_branch: str = _DEFAULT_DBT_BRANCH,
 ) -> None:
     """Convert dbt semantic models to SLayer models and save to YAML storage."""
     # Clean up existing models directory
@@ -194,9 +141,9 @@ def convert_dbt_to_slayer(
     for warning in result.warnings:
         logger.warning(f"  Conversion: {warning.message}")
 
-    # Save models
+    # Save models — YAMLStorage methods are async, bridge with run_sync.
     for model in result.models:
-        storage.save_model(model)
+        run_sync(storage.save_model(model))
         logger.info(f"  Saved model: {model.name}")
 
     # Save datasource config
@@ -205,7 +152,7 @@ def convert_dbt_to_slayer(
         type="duckdb",
         database=str(db_path.resolve()),
     )
-    storage.save_datasource(ds_config)
+    run_sync(storage.save_datasource(ds_config))
     logger.info(f"  Saved datasource config: {datasource_name}")
 
     # Restore original branch
@@ -214,7 +161,7 @@ def convert_dbt_to_slayer(
 
     # Log summary
     logger.info(f"\nSLayer models saved to: {models_dir}")
-    logger.info(f"Models: {storage.list_models()}")
+    logger.info(f"Models: {run_sync(storage.list_models())}")
 
 
 def verify_gold_queries(db_path: Path) -> None:
@@ -255,7 +202,19 @@ def main() -> None:
         default=_DEFAULT_MODELS_DIR,
         help="Path to output SLayer models directory",
     )
+    parser.add_argument(
+        "--no-bridges",
+        action="store_true",
+        help=(
+            "Use the 'main' branch of the dbt project (25 base semantic "
+            "models, no bridge models). Default uses "
+            "'refresh-2025-additional-models' which adds 3 bridge "
+            "semantic models whose SQL is inlined by SLayer."
+        ),
+    )
     args = parser.parse_args()
+
+    dbt_branch = _NO_BRIDGES_DBT_BRANCH if args.no_bridges else _DEFAULT_DBT_BRANCH
 
     csv_dir = args.dbt_project_path / _CSV_DIR_NAME
     if not csv_dir.exists():
@@ -265,13 +224,14 @@ def main() -> None:
 
     logger.info("=" * 60)
     logger.info("SLayer Benchmark Setup")
+    logger.info(f"  dbt branch: {dbt_branch}")
     logger.info("=" * 60)
 
     logger.info(f"\n1. Loading CSVs from {csv_dir} into DuckDB...")
     load_csvs_into_duckdb(csv_dir, args.db_path)
 
-    logger.info(f"\n2. Converting dbt semantic models to SLayer...")
-    convert_dbt_to_slayer(args.dbt_project_path, args.models_dir, args.db_path)
+    logger.info("\n2. Converting dbt semantic models to SLayer...")
+    convert_dbt_to_slayer(args.dbt_project_path, args.models_dir, args.db_path, dbt_branch=dbt_branch)
 
     logger.info("\n3. Verifying gold queries against DuckDB...")
     verify_gold_queries(args.db_path)

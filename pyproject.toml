@@ -26,7 +26,7 @@ dependencies = [
 
 [project.optional-dependencies]
 slayer = [
-    "motley-slayer[duckdb]>=0.2",
+    "motley-slayer[duckdb] @ git+https://github.com/MotleyAI/slayer.git@egor/dev-1251-dbt-ingestion",
 ]
 dev = [
     "pytest>=8.0.0",
