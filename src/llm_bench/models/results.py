@@ -16,6 +16,7 @@ class QueryGenerationResult:
     timing: float
     token_usage: dict | None
     model_name: str | None = None
+    full_response: str | None = None
 
     @classmethod
     def success_result(

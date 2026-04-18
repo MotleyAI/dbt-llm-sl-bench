@@ -12,7 +12,7 @@ import warnings
 import nest_asyncio
 from loguru import logger
 
-from llm_bench.config import MCPConfig, SemanticLayerConfig, SQLConfig, validate_configs
+from llm_bench.config import MCPConfig, SemanticLayerConfig, SLayerConfig, SQLConfig, validate_configs
 from llm_bench.runners import run_matrix_benchmark
 
 
@@ -63,7 +63,7 @@ def create_model_matrix(strategy: str, models: list[str] | None = None):
         models = ["openai:gpt-5"]
 
     configs = []
-    strategy_class = {"semantic_layer": SemanticLayerConfig, "mcp": MCPConfig, "sql": SQLConfig}[strategy]
+    strategy_class = {"semantic_layer": SemanticLayerConfig, "mcp": MCPConfig, "sql": SQLConfig, "slayer": SLayerConfig}[strategy]
 
     for model in models:
         configs.append(strategy_class(model_name=model))
@@ -91,6 +91,7 @@ if __name__ == "__main__":
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Run LLM benchmarks with configurable logging")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging (shows detailed comparison logs)")
+    parser.add_argument("--iterations", type=int, default=5, help="Number of iterations per question (default: 5)")
     args = parser.parse_args()
 
     # Setup logging with timestamps and dual output
@@ -103,21 +104,27 @@ if __name__ == "__main__":
     # from llm_bench.config import semantic_config
     # sql_answers_list, results_df = run_single_benchmark(semantic_config)
 
-    # GPT-5.3 Codex — thinking-level comparison (5 iterations)
-    model_efforts: list[tuple[str, list[str]]] = [
-        ("openai:gpt-5.3-codex", ["none", "minimal", "low", "medium", "high", "xhigh"]),
-    ]
-
+    # SLayer vs raw SQL — single-effort comparison across two models.
+    # 2 strategies × 2 models × 11 default challenges × N iterations.
+    # At default 5 iterations = 220 LLM calls; use --iterations to adjust.
     example_configs = []
-    for model, efforts in model_efforts:
-        for effort in efforts:
-            for strategy_cls in [SQLConfig, SemanticLayerConfig]:
-                example_configs.append(
-                    strategy_cls(model_name=model, number_of_iterations=5, reasoning_effort=effort)
-                )
+    for strategy_cls in [SQLConfig, SLayerConfig]:
+        example_configs.append(
+            strategy_cls(
+                model_name="openai:gpt-5.3-codex",
+                number_of_iterations=args.iterations,
+                reasoning_effort="medium",
+            )
+        )
+        example_configs.append(
+            strategy_cls(
+                model_name="openai:gpt-4.1-mini",
+                number_of_iterations=args.iterations,
+            )  # reasoning_effort stays None — gpt-4.1-mini is not a reasoning model
+        )
 
     # Validate all configs before running
-    validate_configs(example_configs)  # TODO: re-enable once pydantic-ai adds gpt-5.3-codex
+    # validate_configs(example_configs)  # TODO: re-enable once pydantic-ai adds gpt-5.3-codex
 
     # Load challenges once and share across all configs (more efficient than loading per thread)
     from llm_bench.utils.challenge_loader import load_challenges_from_ttl

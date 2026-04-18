@@ -142,4 +142,7 @@ class SQLAnswerFactory:
             iteration=iteration,
             batch_id=batch_id,
         )
-        return self.create_answer(request, model_name=result.model_name)
+        answer = self.create_answer(request, model_name=result.model_name)
+        if result.full_response:
+            answer.full_response = result.full_response
+        return answer

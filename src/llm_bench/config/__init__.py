@@ -10,7 +10,7 @@ from llm_bench.config.manager import (
     sql_config,
 )
 from llm_bench.config.settings import EnvSettings, settings
-from llm_bench.config.strategies import MCPConfig, SemanticLayerConfig, SQLConfig
+from llm_bench.config.strategies import MCPConfig, SemanticLayerConfig, SLayerConfig, SQLConfig
 from llm_bench.config.validation import validate_configs
 
 
@@ -19,6 +19,7 @@ __all__ = [
     "ConfigurationManager",
     "EnvSettings",
     "MCPConfig",
+    "SLayerConfig",
     "SQLConfig",
     "SemanticLayerConfig",
     "config",

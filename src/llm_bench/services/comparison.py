@@ -199,6 +199,10 @@ class ComparisonService:
                         normalized_cols.append(f"{col!r}: comparison object->float")
                     except (ValueError, TypeError):
                         pass  # Keep as-is if conversion fails
+                elif pd.api.types.is_numeric_dtype(gold_dtype) and pd.api.types.is_numeric_dtype(comp_dtype) and gold_dtype != comp_dtype:
+                    gold_df[col] = gold_df[col].astype(float)
+                    comparison_df[col] = comparison_df[col].astype(float)
+                    normalized_cols.append(f"{col!r}: {gold_dtype}->{comp_dtype}->float")
                 elif gold_dtype is object and comp_dtype is object:
                     # Both are object, check if they contain numeric values
                     if len(gold_df[col]) > 0:

@@ -13,10 +13,14 @@ if TYPE_CHECKING:
 class EnvSettings(BaseSettings):
     """Application settings loaded from environment variables or .env file."""
 
-    # dbt Semantic Layer Configuration
-    sl_url: str
-    environment_id: str
-    dbt_sl_service_token: str
+    # dbt Semantic Layer Configuration (optional — only needed for semantic_layer/mcp strategies)
+    sl_url: str = ""
+    environment_id: str = ""
+    dbt_sl_service_token: str = ""
+
+    # SLayer Configuration (optional — only needed for slayer strategy)
+    slayer_models_dir: str = Field(default="slayer_models", description="Directory containing SLayer YAML models and datasources")
+    slayer_db_path: str = Field(default="acme.duckdb", description="Path to DuckDB database file for SLayer benchmarks")
 
     # MCP Server Configuration
     mcp_server_type: Literal["http", "stdio"] = Field(
