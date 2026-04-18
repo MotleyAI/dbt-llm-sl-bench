@@ -13,6 +13,7 @@ dependencies = [
     "anyio>=4.6,<4.9",
     "duckdb>=1.3.2",
     "ipykernel>=6.30.1",
+    "litellm>=1.83.9",
     "loguru>=0.7.0",
     "matplotlib>=3.10.6",
     "nest-asyncio>=1.6.0",
@@ -26,7 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 slayer = [
-    "motley-slayer[duckdb] @ git+https://github.com/MotleyAI/slayer.git@egor/dev-1251-dbt-ingestion",
+    "motley-slayer[duckdb] @ file:///${PROJECT_ROOT}/../slayer",
 ]
 dev = [
     "pytest>=8.0.0",

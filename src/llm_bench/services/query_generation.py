@@ -205,69 +205,57 @@ class SLayerQueryStrategy(QueryStrategy):
 
     def __init__(self, config: BaseConfig) -> None:
         self.config = config
+        self._prompt_prefix: str | None = None
+
+    @staticmethod
+    def _build_prompt_prefix(context: dict[str, str]) -> str:
+        """Build the static part of the prompt (help + model inspections)."""
+        return (
+            "You are generating a SLayer semantic layer query as a JSON object.\n\n"
+            + context["help"]
+            + "\n\nAvailable models (detailed schemas and sample data):\n\n"
+            + context["model_inspections"]
+            + "\n\nAnswer the following question by constructing a SLayer query.\n"
+            "First, explain step by step the choices you are making: which model to use, "
+            "which measures and dimensions, which filters, and why.\n"
+            "Then finish with the final query JSON delimited by ```json and ```.\n\n"
+            "IMPORTANT: The query must be a single JSON object. Do not use CTEs, subqueries, or multiple queries.\n"
+            "If the question cannot be answered with a single SLayer query, return exactly: CANNOT_ANSWER\n\n"
+            "Here's the question:\n"
+        )
 
     def generate_query(self, request: QueryRequest) -> QueryGenerationResult:
         start_time = time.time()
         logger.debug(f"[SLayer] Starting query generation for: {request.question[:50]}...")
 
-        if not request.context or "slayer_model_summaries" not in request.context:
-            error = ValueError("SLayerQueryStrategy requires slayer_model_summaries in context")
+        required_keys = ("help", "model_inspections")
+        if not request.context or not all(k in request.context for k in required_keys):
+            error = ValueError(f"SLayerQueryStrategy requires {', '.join(required_keys)} in context")
             logger.error("[SLayer] Missing required context")
             return QueryGenerationResult.error_result(error, "", time.time() - start_time)
 
-        prompt = r"""
-        You are generating a SLayer semantic layer query as a JSON object.
+        # Build static prefix once, reuse for all questions
+        if self._prompt_prefix is None:
+            self._prompt_prefix = self._build_prompt_prefix(request.context)
 
-        SLayer queries have this structure:
-        {
-          "source_model": "model_name",
-          "fields": [{"formula": "measure_name:aggregation"}],
-          "dimensions": ["dim1", "dim2"],
-          "filters": ["dim == 'value'", "dim > 100"],
-          "time_dimensions": [{"dimension": "date_col", "granularity": "month"}],
-          "order": [{"column": "field_name", "direction": "desc"}],
-          "limit": 10
-        }
-
-        Key syntax rules:
-        - Fields use colon syntax for aggregations: "revenue:sum", "*:count", "amount:avg", "id:count_distinct"
-        - "*:count" means COUNT(*) — count all rows
-        - "measure_name:count" means COUNT(measure_name) — count non-null values
-        - Available aggregations: sum, avg, min, max, count, count_distinct, median
-        - For derived calculations: {"formula": "measure1:sum / measure2:sum", "name": "result_name"}
-        - Dimensions from joined models use dot syntax: "joined_model.dimension_name"
-        - Fields from joined models: {"formula": "joined_model.measure:sum"}
-        - Filters: "dimension == 'value'", "dimension > 100", "dimension IN ('a', 'b')"
-        - Time dimensions specify grouping by date with granularity (day, week, month, quarter, year)
-
-        Available models and their schemas:
-
-        """
-        prompt += request.context["slayer_model_summaries"]
-        prompt += """
-
-        Write a SLayer query JSON to answer the following question.
-        Return ONLY the JSON object, no explanation, no markdown formatting.
-
-        IMPORTANT: Your response must be a single JSON object. Do not use CTEs, subqueries, or multiple queries.
-        If the question cannot be answered with a single SLayer query, return exactly: CANNOT_ANSWER
-
-        Here's the question:
-        """
-        prompt += request.question
+        prompt = self._prompt_prefix + request.question
 
         try:
             logger.debug("[SLayer] Executing prompt via LLM...")
             query_result = execute_prompt(prompt, self.config)
             timing = time.time() - start_time
 
-            # Extract JSON from response (LLM may wrap in markdown code blocks)
             raw_text = query_result.text.strip()
             json_text = _extract_json(raw_text)
 
             logger.info(f"[SLayer] Generated SLayer query (took {timing:.2f}s)")
-            logger.debug(f"[SLayer] Query result: {json_text[:100]}...")
-            return QueryGenerationResult.success_result(json_text, prompt, timing, query_result.usage, query_result.model_name)
+            logger.debug(f"[SLayer] Full response ({len(raw_text)} chars): {raw_text[:200]}...")
+            logger.debug(f"[SLayer] Extracted JSON: {json_text[:100]}...")
+
+            # Store full reasoning + extracted JSON separately
+            result = QueryGenerationResult.success_result(json_text, prompt, timing, query_result.usage, query_result.model_name)
+            result.full_response = raw_text
+            return result
         except Exception as e:
             timing = time.time() - start_time
             logger.error(f"[SLayer] Failed to generate query after {timing:.2f}s: {e}")
@@ -275,22 +263,22 @@ class SLayerQueryStrategy(QueryStrategy):
 
 
 def _extract_json(text: str) -> str:
-    """Extract JSON object from LLM response text.
+    """Extract the last ```json ... ``` fenced block from LLM response text.
 
-    Handles markdown code blocks, commentary before/after, etc.
+    Falls back to finding JSON object boundaries if no fenced block exists.
     """
+    import re
+
     # If it's CANNOT_ANSWER, pass through
     if text.strip() == "CANNOT_ANSWER":
         return text
 
-    # Strip markdown code blocks
-    if "```" in text:
-        import re
-        match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
-        if match:
-            text = match.group(1).strip()
+    # Find the LAST ```json ... ``` fenced block (the final query after reasoning)
+    matches = list(re.finditer(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL))
+    if matches:
+        return matches[-1].group(1).strip()
 
-    # Try to find JSON object boundaries
+    # Fallback: find JSON object boundaries
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:

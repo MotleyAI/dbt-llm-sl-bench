@@ -165,6 +165,48 @@ MCP_STDIO_ARGS=["mcp-server-dbt", "--manifest-path", "./target/manifest.json"]
 
 See `.env.example` for all MCP options.
 
+## SLayer strategy
+
+The `slayer` strategy runs queries against a local [SLayer](https://github.com/MotleyAI/slayer) instance backed by DuckDB, using models auto-converted from the dbt semantic models.
+
+### Setup
+
+Install the benchmark with the `slayer` extra (this pulls in `motley-slayer` from the sibling `../slayer` directory):
+
+```bash
+uv sync --extra slayer
+```
+
+To pick up local changes to SLayer after editing its source code, reinstall the package:
+
+```bash
+uv sync --reinstall-package motley-slayer --extra slayer
+```
+
+### Running
+
+The `run_and_analyze.py` script handles setup (loading CSVs into DuckDB, converting dbt models) and benchmarking in one step:
+
+```bash
+# Full run: setup + benchmark + analysis
+uv run python run_and_analyze.py --model openai:gpt-5.3-codex --effort medium --no-bridges
+
+# Skip setup (reuse existing DB and models)
+uv run python run_and_analyze.py --skip-setup --model openai:gpt-5.3-codex --effort medium
+
+# Skip both setup and run (just re-analyze latest results)
+uv run python run_and_analyze.py --skip-setup --skip-run
+```
+
+Options:
+- `--model MODEL` — LLM model name (default: `openai:gpt-5.3-codex`)
+- `--effort EFFORT` — Reasoning effort level (default: `medium`)
+- `--iterations N` — Number of iterations per question (default: `1`)
+- `--no-bridges` — Regenerate models without bridge models
+- `--skip-setup` — Skip `setup_slayer.py` (reuse existing DB and models)
+- `--skip-run` — Skip the benchmark run (only analyze existing results)
+- `--output FILE` — Output markdown file (default: `benchmark_analysis.md`)
+
 ## Run the dashboard locally
 
 Requires `pnpm` and Node.js.

@@ -74,6 +74,9 @@ def load_csvs_into_duckdb(csv_dir: Path, db_path: Path) -> None:
                 f"CREATE TABLE \"{table_name}\" AS SELECT * FROM read_csv_auto('{csv_file}', header=true)"
             )
 
+        # Fix columns that DuckDB inferred as VARCHAR due to all-NULL CSV data
+        conn.execute("ALTER TABLE FireClaim ALTER Premium TYPE DOUBLE")
+
         # Verify tables
         tables = conn.execute("SHOW TABLES").fetchall()
         logger.info(f"  Created {len(tables)} tables: {[t[0] for t in tables]}")

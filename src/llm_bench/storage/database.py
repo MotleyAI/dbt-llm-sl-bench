@@ -42,8 +42,9 @@ def save_sql_answer(answer: SQLAnswer, database_file: str, max_retries: int = 10
                 answer_df = pd.DataFrame([answer_dict])  # noqa: F841 - used by DuckDB SQL via variable name
                 conn.execute("CREATE TABLE IF NOT EXISTS sql_answers AS SELECT * FROM answer_df WHERE 1=0")
                 conn.execute("alter table sql_answers alter token_usage type JSON")  # in case the first one was empty
-                # Add cost column to existing tables that predate the pricing feature
+                # Add columns to existing tables that predate newer features
                 conn.execute("ALTER TABLE sql_answers ADD COLUMN IF NOT EXISTS cost DOUBLE")
+                conn.execute("ALTER TABLE sql_answers ADD COLUMN IF NOT EXISTS full_response VARCHAR")
                 conn.execute("INSERT INTO sql_answers BY NAME SELECT * FROM answer_df")
                 conn.close()
                 logger.debug("Successfully saved SQLAnswer to database")

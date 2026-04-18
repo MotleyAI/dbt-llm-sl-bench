@@ -27,6 +27,7 @@ class SQLAnswer:
     iteration: int = 0
     batch_id: int = 0  # Unique identifier for a benchmark run
     config_comment: str = ""  # Optional comment describing the configuration variant used
+    full_response: str = ""  # Full LLM response (reasoning + JSON) before extraction
 
 
 @dataclass

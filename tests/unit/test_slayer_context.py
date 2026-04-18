@@ -1,4 +1,6 @@
-"""Tests for SLayer context building from MCP server tools."""
+"""Tests for SLayer context building from MCP server tools and query execution."""
+
+import json
 
 import duckdb
 import pytest
@@ -7,6 +9,7 @@ from llm_bench.config.strategies import SLayerConfig
 from llm_bench.models.requests import QueryRequest
 from llm_bench.runners.benchmark import _HELP_TOPICS, _build_slayer_context
 from llm_bench.services.query_generation import SLayerQueryStrategy
+from llm_bench.services.slayer_database import SLayerDatabaseService
 
 from slayer.async_utils import run_sync
 from slayer.core.enums import DataType
@@ -174,5 +177,43 @@ class TestSLayerQueryStrategyContext:
         result = strategy.generate_query(
             QueryRequest("test question", context=partial_context)
         )
+        assert not result.success
+        assert result.error is not None
+
+
+class TestSLayerDatabaseService:
+    @pytest.fixture
+    def db_service(self, slayer_storage, tmp_path):
+        db_path = tmp_path / "test.duckdb"
+        return SLayerDatabaseService(
+            slayer_models_dir=slayer_storage,
+            slayer_db_path=str(db_path),
+        )
+
+    def test_executes_raw_sql(self, db_service):
+        result = db_service.execute_query("SELECT 1 AS n")
+        assert result.success
+        assert not result.data.empty
+        assert result.data.iloc[0, 0] == 1
+
+    def test_executes_slayer_json_query(self, db_service):
+        query = json.dumps({"source_model": "orders", "fields": ["*:count"]})
+        result = db_service.execute_query(query)
+        assert result.success, f"SLayer query failed: {result.error}"
+        assert not result.data.empty
+        assert result.data.iloc[0, 0] == 2  # 2 rows inserted in fixture
+
+    def test_slayer_query_with_dimensions(self, db_service):
+        query = json.dumps({
+            "source_model": "orders",
+            "fields": ["*:count"],
+            "dimensions": ["status"],
+        })
+        result = db_service.execute_query(query)
+        assert result.success, f"SLayer query failed: {result.error}"
+        assert len(result.data) == 2  # 'completed' and 'pending'
+
+    def test_slayer_invalid_json_returns_error(self, db_service):
+        result = db_service.execute_query("{bad json")
         assert not result.success
         assert result.error is not None

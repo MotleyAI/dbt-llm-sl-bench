@@ -175,8 +175,64 @@ class BenchmarkRunner:
             answer.is_correct = False
             logger.error(f"  ❌ {answer.method} - {e!s}")
 
+    def _generate_single(self, args: tuple) -> SQLAnswer:
+        """Generate a query for one challenge — LLM call only, no DB access.
+
+        Safe to call from a thread pool since it only makes HTTP requests.
+        """
+        i, challenge_text, strategy, metric_context = args
+        logger.info(f"[Iteration {i}] Generating {strategy}: {challenge_text[:60]}...")
+        return self._generate_query_with_retry(strategy, challenge_text, i, metric_context)
+
+    def _execute_and_finalize(
+        self, i: int, row: Any, answer: SQLAnswer, strategy: str, results_lock: threading.Lock,
+    ) -> dict[str, Any]:
+        """Execute gold + generated queries, compare, save. Sequential, DB-safe."""
+        invocation_timestamp = time.time()
+        title = row["title"]
+        challenge_text = row["challenge_text"]
+        gold_query_text = row["gold_query_text"]
+
+        logger.info(f"[Iteration {i}] Executing + comparing: {challenge_text[:60]}...")
+
+        # Execute gold query
+        gold_result = self.services.database_service.execute_query(str(gold_query_text))
+        gold_df_success, gold_df = gold_result.success, gold_result.data
+
+        # Execute and compare generated query
+        if gold_df_success:
+            self._execute_and_compare_query(answer, gold_df)
+
+        # Save results
+        try:
+            save_sql_answer(answer, self.services.config.database_file)
+            with results_lock:
+                self.sql_answers_list.append(answer)
+        except Exception as e:
+            logger.error(f"[Iteration {i}] CRITICAL: Failed to save results: {e}")
+            raise
+
+        return {
+            "title": title,
+            "challenge_text": challenge_text,
+            "display_text": insert_line_break(challenge_text),
+            "invocation_timestamp": invocation_timestamp,
+            "iteration_num": i,
+            "strategy": strategy,
+            "model": answer.model,
+            "gold_query_text": gold_query_text,
+            "generated_query_text": answer.sql if answer.is_successful else str(answer.error),
+            "generation_timing": answer.timing,
+            "cost": answer.cost,
+            "gold_query_df": gold_df.to_string() if gold_df_success else "",
+            "generated_df": answer.data.to_string() if not answer.data.empty else "",
+            "is_result_equivalent": answer.is_correct,
+            "comparison_exception": answer.comparison_error,
+            "prompt": answer.prompt,
+        }
+
     def _process_single_challenge(self, args: tuple) -> dict[str, Any]:
-        """Process a single challenge - designed to be called in parallel"""
+        """Process a single challenge end-to-end (sequential fallback)."""
         i, row, strategy, metric_context, results_lock = args
 
         invocation_timestamp = time.time()
@@ -188,39 +244,27 @@ class BenchmarkRunner:
         logger.info(f"[Iteration {i}] Processing {strategy}: {challenge_text}")
 
         # Execute gold query
-        logger.debug(f"[Iteration {i}] Executing gold query...")
         gold_result = self.services.database_service.execute_query(str(gold_query_text))
         gold_df_success, gold_df = gold_result.success, gold_result.data
-        logger.debug(f"[Iteration {i}] Gold query executed: success={gold_df_success}")
 
-        # Generate query for the specific strategy
+        # Generate query
         if strategy == "semantic_layer" and not metric_context:
             raise ValueError("metric_context is required for semantic_layer strategy")
-
-        logger.debug(f"[Iteration {i}] Generating query with retry logic...")
         answer = self._generate_query_with_retry(strategy, challenge_text, i, metric_context)
 
-        # Execute and compare query
+        # Execute and compare
         if gold_df_success:
-            logger.debug(f"[Iteration {i}] Executing and comparing generated query...")
             self._execute_and_compare_query(answer, gold_df)
 
-        # Save results (thread-safe)
-        logger.debug(f"[Iteration {i}] Saving results to database...")
+        # Save results
         try:
-            # save_sql_answer now has its own internal locking
             save_sql_answer(answer, self.services.config.database_file)
             with results_lock:
                 self.sql_answers_list.append(answer)
-            logger.debug(f"[Iteration {i}] Challenge processing complete")
         except Exception as e:
             logger.error(f"[Iteration {i}] CRITICAL: Failed to save results to database: {e}")
-            logger.error(f"[Iteration {i}] Challenge: {challenge_text}")
-            logger.error(f"[Iteration {i}] This result will be lost!")
-            # Re-raise to make the failure visible
             raise
 
-        # Return result row as dict
         return {
             "title": title,
             "challenge_text": challenge_text,
@@ -231,13 +275,10 @@ class BenchmarkRunner:
             "model": answer.model,
             "gold_query_text": gold_query_text,
             "generated_query_text": answer.sql if answer.is_successful else str(answer.error),
-            # timings
             "generation_timing": answer.timing,
             "cost": answer.cost,
-            # dataframes
             "gold_query_df": gold_df.to_string() if gold_df_success else "",
             "generated_df": answer.data.to_string() if not answer.data.empty else "",
-            # results
             "is_result_equivalent": answer.is_correct,
             "comparison_exception": answer.comparison_error,
             "prompt": answer.prompt,
@@ -317,30 +358,27 @@ class BenchmarkRunner:
             logger.info("=" * 80)
 
             if parallel and len(filtered_challenges) > 1:
-                # Parallel processing of challenges
-                logger.info(f"Processing challenges in parallel (max_workers={max_workers})")
+                # Phase 1: Parallel LLM generation (no DB access)
+                n = len(filtered_challenges)
+                logger.info(f"Phase 1: Generating {n} queries in parallel (max_workers={max_workers})")
 
-                # Create list of (iteration, row, strategy, metric_context, lock) tuples
-                challenge_args = [
-                    (i, row, strategy, metric_context, results_lock) for _, row in filtered_challenges.iterrows()
+                gen_args = [
+                    (i, row["challenge_text"], strategy, metric_context)
+                    for _, row in filtered_challenges.iterrows()
                 ]
-
-                # Process challenges in parallel
-                logger.debug(f"Submitting {len(challenge_args)} challenges to thread pool...")
                 try:
                     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        result_rows = list(executor.map(self._process_single_challenge, challenge_args))
-                    logger.debug(f"All {len(result_rows)} challenges completed for iteration {i}")
+                        answers = list(executor.map(self._generate_single, gen_args))
+                    logger.info(f"Phase 1 complete: {n} queries generated")
                 except Exception as e:
-                    logger.error(f"CRITICAL: Exception during parallel challenge processing in iteration {i}: {e}")
-                    logger.error(f"Exception type: {type(e).__name__}")
-                    import traceback
-
-                    logger.error(f"Traceback:\n{traceback.format_exc()}")
+                    logger.error(f"CRITICAL: Exception during parallel LLM generation: {e}")
                     raise
 
-                # Add results to dataframe
-                results_df = pd.concat([results_df, pd.DataFrame(result_rows)], ignore_index=True)
+                # Phase 2: Sequential DB execution + comparison
+                logger.info(f"Phase 2: Executing and comparing {n} queries sequentially")
+                for (_, row), answer in zip(filtered_challenges.iterrows(), answers):
+                    result_row = self._execute_and_finalize(i, row, answer, strategy, results_lock)
+                    results_df = pd.concat([results_df, pd.DataFrame([result_row])], ignore_index=True)
             else:
                 # Sequential processing (original behavior)
                 logger.info("Processing challenges sequentially")
@@ -359,45 +397,58 @@ class BenchmarkRunner:
 
 
 def _build_slayer_context(slayer_models_dir: str) -> dict[str, str]:
-    """Build model context for SLayer strategy from YAML storage."""
+    """Build model context for SLayer strategy using MCP server tools."""
     import json
 
+    from slayer.async_utils import run_sync
+    from slayer.mcp.server import create_mcp_server
+    from slayer.sql.client import _sync_engines
     from slayer.storage.yaml_storage import YAMLStorage
 
     storage = YAMLStorage(base_dir=slayer_models_dir)
-    model_summaries = []
-    for model_name in storage.list_models():
-        model = storage.get_model(model_name)
-        if model is None or model.hidden:
-            continue
-        summary = {
-            "name": model.name,
-            "description": model.description,
-            "dimensions": [
-                {
-                    "name": d.name,
-                    "type": str(d.type.value) if d.type else "string",
-                    "description": d.description,
-                }
-                for d in model.dimensions
-                if not d.hidden
-            ],
-            "measures": [
-                {
-                    "name": m.name,
-                    "description": m.description,
-                    "allowed_aggregations": m.allowed_aggregations,
-                }
-                for m in model.measures
-                if not m.hidden
-            ],
-            "joins": [
-                {"target_model": j.target_model, "join_pairs": j.join_pairs}
-                for j in model.joins
-            ],
-        }
-        model_summaries.append(summary)
-    return {"slayer_model_summaries": json.dumps(model_summaries, indent=2)}
+    mcp = create_mcp_server(storage=storage)
+
+    def _call(name: str, arguments: dict | None = None) -> str:
+        content_blocks, _ = run_sync(mcp.call_tool(name=name, arguments=arguments or {}))
+        return content_blocks[0].text
+
+    # 1. Collect help intro page only (deep-dive topics add bulk without improving accuracy)
+    help_sections = [_call("help")]
+
+    # 2. Discover models: list_datasources → models_summary (JSON) → model names
+    ds_text = _call("list_datasources")
+    datasource_names = []
+    for line in ds_text.strip().splitlines():
+        line = line.strip()
+        if line.startswith("- "):
+            datasource_names.append(line[2:].split(" (")[0])
+
+    model_names: list[str] = []
+    for ds_name in datasource_names:
+        summary_json = _call("models_summary", {"datasource_name": ds_name, "format": "json"})
+        summary = json.loads(summary_json)
+        for model_info in summary.get("models", []):
+            model_names.append(model_info["name"])
+
+    # 3. Inspect each model for full details + sample data
+    inspections: list[str] = []
+    for model_name in model_names:
+        try:
+            inspections.append(_call("inspect_model", {"model_name": model_name}))
+        except Exception:
+            logger.warning("Failed to inspect model '%s', skipping", model_name)
+
+    # Clean up cached SQLAlchemy engines so subsequent DuckDB connections
+    # (e.g. gold-query execution via raw duckdb.connect) don't clash on
+    # DuckDB's "same file, different configuration" constraint.
+    for engine in _sync_engines.values():
+        engine.dispose()
+    _sync_engines.clear()
+
+    return {
+        "help": "\n\n".join(help_sections),
+        "model_inspections": "\n\n---\n\n".join(inspections),
+    }
 
 
 def run_single_benchmark(

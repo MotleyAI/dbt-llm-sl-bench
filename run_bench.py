@@ -91,6 +91,7 @@ if __name__ == "__main__":
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Run LLM benchmarks with configurable logging")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging (shows detailed comparison logs)")
+    parser.add_argument("--iterations", type=int, default=5, help="Number of iterations per question (default: 5)")
     args = parser.parse_args()
 
     # Setup logging with timestamps and dual output
@@ -104,25 +105,26 @@ if __name__ == "__main__":
     # sql_answers_list, results_df = run_single_benchmark(semantic_config)
 
     # SLayer vs raw SQL — single-effort comparison across two models.
-    # 2 strategies × 2 models × 11 default challenges × 5 iterations = 220 LLM calls.
+    # 2 strategies × 2 models × 11 default challenges × N iterations.
+    # At default 5 iterations = 220 LLM calls; use --iterations to adjust.
     example_configs = []
     for strategy_cls in [SQLConfig, SLayerConfig]:
         example_configs.append(
             strategy_cls(
                 model_name="openai:gpt-5.3-codex",
-                number_of_iterations=5,
+                number_of_iterations=args.iterations,
                 reasoning_effort="medium",
             )
         )
         example_configs.append(
             strategy_cls(
                 model_name="openai:gpt-4.1-mini",
-                number_of_iterations=5,
+                number_of_iterations=args.iterations,
             )  # reasoning_effort stays None — gpt-4.1-mini is not a reasoning model
         )
 
     # Validate all configs before running
-    validate_configs(example_configs)  # TODO: re-enable once pydantic-ai adds gpt-5.3-codex
+    # validate_configs(example_configs)  # TODO: re-enable once pydantic-ai adds gpt-5.3-codex
 
     # Load challenges once and share across all configs (more efficient than loading per thread)
     from llm_bench.utils.challenge_loader import load_challenges_from_ttl
